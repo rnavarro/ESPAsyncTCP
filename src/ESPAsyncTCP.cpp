@@ -252,7 +252,10 @@ bool AsyncClient::connect(IPAddress ip, uint16_t port){
     return false;
   }
 #endif
-  tcp_pcb* pcb = tcp_new();
+  // IP_ANY_TYPE lets tcp_connect() set the PCB address type from the
+  // destination, so the same path serves IPv4 and IPv6 peers. Matches
+  // the listening side (AsyncServer::begin).
+  tcp_pcb* pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
   if (!pcb){ //could not allocate pcb
     return false;
   }
@@ -274,7 +277,15 @@ bool AsyncClient::connect(const char* host, uint16_t port, bool secure){
 bool AsyncClient::connect(const char* host, uint16_t port){
 #endif
   IPAddress addr;
+#if LWIP_IPV6
+  // Resolve A records first, then AAAA. IPv4-first keeps hosts without
+  // IPv6 connectivity working unchanged and avoids a failing AAAA lookup
+  // ahead of every connection to the (still common) v4-only services.
+  err_t err = dns_gethostbyname_addrtype(host, addr,
+      (dns_found_callback)&_s_dns_found, this, LWIP_DNS_ADDRTYPE_IPV4_IPV6);
+#else
   err_t err = dns_gethostbyname(host, addr, (dns_found_callback)&_s_dns_found, this);
+#endif
   if(err == ERR_OK) {
 #if ASYNC_TCP_SSL_ENABLED
     return connect(addr, port, secure);

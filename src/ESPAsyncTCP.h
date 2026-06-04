@@ -147,13 +147,22 @@ class AsyncClient {
 #if LWIP_IPV6
     // Happy-eyeballs-lite state: the hostname from connect(host, port) is
     // kept so a failed connect attempt can be retried once with the
-    // opposite address family (see _he_flip).
+    // opposite address family (see _he_flip). _he_lastFailHost remembers
+    // the most recent host whose preferred-family connect attempt failed
+    // or was aborted, so subsequent attempts to that host start on the
+    // opposite family instead of repeating the dead one. That covers
+    // silent blackholes where the application timeout aborts the attempt
+    // before lwIP reports an error.
     char* _he_host = nullptr;
     bool _he_flipped = false;
     bool _he_connecting = false;
+    u8_t _he_usedType = 0;
     static u8_t _dnsAddrType;
+    static char* _he_lastFailHost;
+    static u8_t _he_flipType(u8_t addrtype);
     void _he_setHost(const char* host, uint16_t port);
     void _he_clear();
+    void _he_recordFail();
     bool _he_flip();
 #endif
 

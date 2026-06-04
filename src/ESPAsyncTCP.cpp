@@ -257,9 +257,16 @@ u8_t AsyncClient::getDnsAddrType(){
   return _dnsAddrType;
 }
 
+// Strict opposite family of an attempt. Strict single-family types are
+// required here: the combined preference types (IPV4_IPV6 / IPV6_IPV4)
+// only order FRESH queries - a cached entry of the wrong family still
+// satisfies them, so a flip would re-fetch the very address that just
+// failed. The strict types are family-filtered against the cache and
+// force a fresh query for the other record.
 u8_t AsyncClient::_he_flipType(u8_t addrtype){
-  return (addrtype == LWIP_DNS_ADDRTYPE_IPV4_IPV6) ?
-      LWIP_DNS_ADDRTYPE_IPV6_IPV4 : LWIP_DNS_ADDRTYPE_IPV4_IPV6;
+  bool wasV6 = (addrtype == LWIP_DNS_ADDRTYPE_IPV6_IPV4) ||
+               (addrtype == LWIP_DNS_ADDRTYPE_IPV6);
+  return wasV6 ? LWIP_DNS_ADDRTYPE_IPV4 : LWIP_DNS_ADDRTYPE_IPV6;
 }
 
 void AsyncClient::_he_setHost(const char* host, uint16_t port){

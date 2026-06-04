@@ -144,6 +144,19 @@ class AsyncClient {
     u8_t _recv_pbuf_flags;
     std::shared_ptr<ACErrorTracker> _errorTracker;
 
+#if LWIP_IPV6
+    // Happy-eyeballs-lite state: the hostname from connect(host, port) is
+    // kept so a failed connect attempt can be retried once with the
+    // opposite address family (see _he_flip).
+    char* _he_host = nullptr;
+    bool _he_flipped = false;
+    bool _he_connecting = false;
+    static u8_t _dnsAddrType;
+    void _he_setHost(const char* host, uint16_t port);
+    void _he_clear();
+    bool _he_flip();
+#endif
+
     void _close();
     void _connected(std::shared_ptr<ACErrorTracker>& closeAbort, void* pcb, err_t err);
     void _error(err_t err);
@@ -205,6 +218,17 @@ class AsyncClient {
     void stop();
     void abort();
     bool free();
+
+#if LWIP_IPV6
+    // DNS resolution order for connect(host, port):
+    // LWIP_DNS_ADDRTYPE_IPV4_IPV6 (default, A record first) or
+    // LWIP_DNS_ADDRTYPE_IPV6_IPV4 (AAAA first). When the first connect
+    // attempt fails, one retry is made with the opposite order
+    // (happy-eyeballs-lite), so a published record whose path is broken
+    // degrades to a slower connect instead of a failure.
+    static void setDnsAddrType(u8_t addrtype);
+    static u8_t getDnsAddrType();
+#endif
 
     bool canSend();//ack is not pending
     size_t space();

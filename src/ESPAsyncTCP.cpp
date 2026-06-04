@@ -225,7 +225,9 @@ AsyncClient::AsyncClient(tcp_pcb* pcb):
 AsyncClient::~AsyncClient(){
   if(_pcb)
     _close();
-
+#if LWIP_IPV6
+  _he_clear();
+#endif
   _errorTracker->clearClient();
 }
 
@@ -236,6 +238,57 @@ inline void clearTcpCallbacks(tcp_pcb* pcb){
       tcp_err(pcb, NULL);
       tcp_poll(pcb, NULL, 0);
 }
+
+#if LWIP_IPV6
+u8_t AsyncClient::_dnsAddrType = LWIP_DNS_ADDRTYPE_IPV4_IPV6;
+
+void AsyncClient::setDnsAddrType(u8_t addrtype){
+  _dnsAddrType = addrtype;
+}
+
+u8_t AsyncClient::getDnsAddrType(){
+  return _dnsAddrType;
+}
+
+void AsyncClient::_he_setHost(const char* host, uint16_t port){
+  _he_clear();
+  _he_host = strdup(host);
+  _he_flipped = false;
+  _connect_port = port;
+}
+
+void AsyncClient::_he_clear(){
+  if(_he_host){
+    ::free(_he_host);
+    _he_host = NULL;
+  }
+}
+
+// One opposite-address-family retry after a failed connect attempt.
+// The dns_addrtype fallback in connect(host, port) only covers a missing
+// DNS record; this covers a record that exists but points to an
+// unreachable path (for example a published AAAA on a network whose IPv6
+// routing is broken). Sequential, one pcb at a time.
+bool AsyncClient::_he_flip(){
+  if(!_he_host || _he_flipped){
+    return false;
+  }
+  _he_flipped = true;
+  u8_t addrtype = (_dnsAddrType == LWIP_DNS_ADDRTYPE_IPV4_IPV6) ?
+      LWIP_DNS_ADDRTYPE_IPV6_IPV4 : LWIP_DNS_ADDRTYPE_IPV4_IPV6;
+  IPAddress addr;
+  err_t err = dns_gethostbyname_addrtype(_he_host, addr,
+      (dns_found_callback)&_s_dns_found, this, addrtype);
+  if(err == ERR_OK){
+#if ASYNC_TCP_SSL_ENABLED
+    return connect(addr, _connect_port, _pcb_secure);
+#else
+    return connect(addr, _connect_port);
+#endif
+  }
+  return (err == ERR_INPROGRESS);
+}
+#endif // LWIP_IPV6
 
 #if ASYNC_TCP_SSL_ENABLED
 bool AsyncClient::connect(IPAddress ip, uint16_t port, bool secure){
@@ -267,6 +320,9 @@ bool AsyncClient::connect(IPAddress ip, uint16_t port){
 #endif
   tcp_arg(pcb, this);
   tcp_err(pcb, &_s_error);
+#if LWIP_IPV6
+  _he_connecting = true;
+#endif
   size_t err = tcp_connect(pcb, addr, port,(tcp_connected_fn)&_s_connected);
   return (ERR_OK == err);
 }
@@ -278,11 +334,13 @@ bool AsyncClient::connect(const char* host, uint16_t port){
 #endif
   IPAddress addr;
 #if LWIP_IPV6
-  // Resolve A records first, then AAAA. IPv4-first keeps hosts without
-  // IPv6 connectivity working unchanged and avoids a failing AAAA lookup
-  // ahead of every connection to the (still common) v4-only services.
+  // Resolve per the configured preference (default: A records first, then
+  // AAAA). IPv4-first keeps hosts without IPv6 connectivity working
+  // unchanged and avoids a failing AAAA lookup ahead of every connection
+  // to the (still common) v4-only services. See setDnsAddrType().
+  _he_setHost(host, port);
   err_t err = dns_gethostbyname_addrtype(host, addr,
-      (dns_found_callback)&_s_dns_found, this, LWIP_DNS_ADDRTYPE_IPV4_IPV6);
+      (dns_found_callback)&_s_dns_found, this, _dnsAddrType);
 #else
   err_t err = dns_gethostbyname(host, addr, (dns_found_callback)&_s_dns_found, this);
 #endif
@@ -475,6 +533,10 @@ void AsyncClient::_connected(std::shared_ptr<ACErrorTracker>& errorTracker, void
 
   _pcb = reinterpret_cast<tcp_pcb*>(pcb);
   if(_pcb){
+#if LWIP_IPV6
+    _he_connecting = false;
+    _he_clear();
+#endif
     _pcb_busy = false;
     _rx_last_packet = millis();
     tcp_setprio(_pcb, TCP_PRIO_MIN);
@@ -503,6 +565,10 @@ void AsyncClient::_connected(std::shared_ptr<ACErrorTracker>& errorTracker, void
 }
 
 void AsyncClient::_close(){
+#if LWIP_IPV6
+  _he_connecting = false;
+  _he_clear();
+#endif
   if(_pcb) {
 #if ASYNC_TCP_SSL_ENABLED
     if(_pcb_secure){
@@ -537,6 +603,18 @@ void AsyncClient::_error(err_t err) {
     // made to set to NULL other callbacks.
     _pcb = NULL;
   }
+#if LWIP_IPV6
+  // Happy-eyeballs-lite: a connect-phase failure gets one retry with the
+  // opposite address family before the error is surfaced.
+  if(_he_connecting && !_he_flipped && _he_host){
+    _he_connecting = false;
+    if(_he_flip()){
+      return;
+    }
+  }
+  _he_connecting = false;
+  _he_clear();
+#endif
   if(_error_cb)
     _error_cb(_error_cb_arg, this, err);
   if(_discard_cb)
@@ -721,6 +799,12 @@ void AsyncClient::_dns_found(const ip_addr *ipaddr){
     connect(ipaddr, _connect_port);
 #endif
   } else {
+#if LWIP_IPV6
+    // No record in either family (the dns_addrtype query already falls
+    // back across record types) - nothing for happy-eyeballs to retry.
+    _he_connecting = false;
+    _he_clear();
+#endif
     if(_error_cb)
       _error_cb(_error_cb_arg, this, -55);
     if(_discard_cb)

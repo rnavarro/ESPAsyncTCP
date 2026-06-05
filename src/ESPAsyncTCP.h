@@ -147,18 +147,28 @@ class AsyncClient {
 #if LWIP_IPV6
     // Happy-eyeballs-lite state: the hostname from connect(host, port) is
     // kept so a failed connect attempt can be retried once with the
-    // opposite address family (see _he_flip). _he_lastFailHost remembers
-    // the most recent host whose preferred-family connect attempt failed
-    // or was aborted, so subsequent attempts to that host start on the
-    // opposite family instead of repeating the dead one. That covers
-    // silent blackholes where the application timeout aborts the attempt
-    // before lwIP reports an error.
+    // opposite address family (see _he_flip). The failure-hint slots
+    // remember hosts whose preferred-family connect attempt failed or was
+    // aborted, so subsequent attempts to those hosts start on the opposite
+    // family instead of repeating the dead one. That covers silent
+    // blackholes where the application timeout aborts the attempt before
+    // lwIP reports an error. Hints expire after HE_FAIL_TTL_MS: while a
+    // hint is active the preferred family is never attempted, so a
+    // non-expiring hint could never clear itself and would pin the host
+    // to the fallback family until reboot. Multiple slots keep two broken
+    // destinations from evicting each other's hint and re-eating the
+    // connect timeout on every alternation.
     char* _he_host = nullptr;
     bool _he_flipped = false;
     bool _he_connecting = false;
     u8_t _he_usedType = 0;
     static u8_t _dnsAddrType;
-    static char* _he_lastFailHost;
+    static const uint32_t HE_FAIL_TTL_MS = 5 * 60 * 1000;
+    static const int HE_FAIL_SLOTS = 4;
+    struct heFailHint { char* host; uint32_t stamp; };
+    static heFailHint _he_failHints[HE_FAIL_SLOTS];
+    static bool _he_failHintActive(const char* host);
+    static void _he_failHintClear(const char* host);   // NULL clears all
     static u8_t _he_flipType(u8_t addrtype);
     void _he_setHost(const char* host, uint16_t port);
     void _he_clear();

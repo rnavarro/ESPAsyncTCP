@@ -241,16 +241,41 @@ inline void clearTcpCallbacks(tcp_pcb* pcb){
 
 #if LWIP_IPV6
 u8_t AsyncClient::_dnsAddrType = LWIP_DNS_ADDRTYPE_IPV4_IPV6;
-char* AsyncClient::_he_lastFailHost = NULL;
+AsyncClient::heFailHint AsyncClient::_he_failHints[AsyncClient::HE_FAIL_SLOTS] = {};
+
+// A hint is active while unexpired. millis() subtraction is
+// overflow-safe (unsigned arithmetic).
+bool AsyncClient::_he_failHintActive(const char* host){
+  if(!host){
+    return false;
+  }
+  for(int i = 0; i < HE_FAIL_SLOTS; i++){
+    if(_he_failHints[i].host && strcmp(_he_failHints[i].host, host) == 0){
+      if((millis() - _he_failHints[i].stamp) < HE_FAIL_TTL_MS){
+        return true;
+      }
+      ::free(_he_failHints[i].host);                  // Expired: retire the slot
+      _he_failHints[i].host = NULL;
+      return false;
+    }
+  }
+  return false;
+}
+
+void AsyncClient::_he_failHintClear(const char* host){
+  for(int i = 0; i < HE_FAIL_SLOTS; i++){
+    if(_he_failHints[i].host && (!host || strcmp(_he_failHints[i].host, host) == 0)){
+      ::free(_he_failHints[i].host);
+      _he_failHints[i].host = NULL;
+    }
+  }
+}
 
 void AsyncClient::setDnsAddrType(u8_t addrtype){
   _dnsAddrType = addrtype;
   // Preference (re)set marks a configuration event: drop the failure
-  // hint so the preferred family gets a fresh chance.
-  if(_he_lastFailHost){
-    ::free(_he_lastFailHost);
-    _he_lastFailHost = NULL;
-  }
+  // hints so the preferred family gets a fresh chance.
+  _he_failHintClear(NULL);
 }
 
 u8_t AsyncClient::getDnsAddrType(){
@@ -284,17 +309,34 @@ void AsyncClient::_he_clear(){
 }
 
 // Remember that this host's preferred-family attempt failed so the next
-// attempt starts on the opposite family. Single slot: the common case is
-// one stubborn destination (an uploader endpoint), not many.
+// attempts (until the TTL expires) start on the opposite family.
 void AsyncClient::_he_recordFail(){
   if(!_he_host){
     return;
   }
-  if(_he_lastFailHost && strcmp(_he_lastFailHost, _he_host) == 0){
-    return;
+  uint32_t now = millis();
+  for(int i = 0; i < HE_FAIL_SLOTS; i++){
+    if(_he_failHints[i].host && strcmp(_he_failHints[i].host, _he_host) == 0){
+      _he_failHints[i].stamp = now;                 // Refresh existing hint
+      return;
+    }
   }
-  ::free(_he_lastFailHost);
-  _he_lastFailHost = strdup(_he_host);
+  int slot = 0;                                     // Empty slot, else oldest (LRU)
+  uint32_t oldestAge = 0;
+  for(int i = 0; i < HE_FAIL_SLOTS; i++){
+    if(!_he_failHints[i].host){
+      slot = i;
+      break;
+    }
+    uint32_t age = now - _he_failHints[i].stamp;
+    if(age >= oldestAge){
+      slot = i;
+      oldestAge = age;
+    }
+  }
+  ::free(_he_failHints[slot].host);
+  _he_failHints[slot].host = strdup(_he_host);
+  _he_failHints[slot].stamp = now;
 }
 
 // One opposite-address-family retry after a failed connect attempt.
@@ -374,7 +416,7 @@ bool AsyncClient::connect(const char* host, uint16_t port){
   // on the opposite one.
   _he_setHost(host, port);
   _he_usedType = _dnsAddrType;
-  if(_he_lastFailHost && strcmp(_he_lastFailHost, host) == 0){
+  if(_he_failHintActive(host)){
     _he_usedType = _he_flipType(_dnsAddrType);
   }
   err_t err = dns_gethostbyname_addrtype(host, addr,
@@ -583,10 +625,8 @@ void AsyncClient::_connected(std::shared_ptr<ACErrorTracker>& errorTracker, void
 #if LWIP_IPV6
     _he_connecting = false;
     // Success on the preferred family clears a stale failure hint.
-    if(_he_host && _he_usedType == _dnsAddrType && _he_lastFailHost &&
-        strcmp(_he_lastFailHost, _he_host) == 0){
-      ::free(_he_lastFailHost);
-      _he_lastFailHost = NULL;
+    if(_he_host && _he_usedType == _dnsAddrType){
+      _he_failHintClear(_he_host);
     }
     _he_clear();
 #endif

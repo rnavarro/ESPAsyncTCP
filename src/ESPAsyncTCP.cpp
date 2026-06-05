@@ -398,7 +398,19 @@ bool AsyncClient::connect(IPAddress ip, uint16_t port){
   _he_connecting = true;
 #endif
   size_t err = tcp_connect(pcb, addr, port,(tcp_connected_fn)&_s_connected);
-  return (ERR_OK == err);
+  if(ERR_OK != err){
+    // Synchronous connect failure (e.g. ERR_RTE with no route for the
+    // address family, ERR_MEM). lwIP did not take ownership of the pcb and
+    // will never invoke the error callback for it, so free it here or it
+    // leaks. Clear the callbacks first: tcp_abort() fires the err callback
+    // via tcp_abandon(), which would re-enter _error(ERR_ABRT).
+    // _he_connecting stays set so a caller-side _error() (the happy-
+    // eyeballs flip path) still owns flip/fail-hint handling.
+    clearTcpCallbacks(pcb);
+    tcp_abort(pcb);
+    return false;
+  }
+  return true;
 }
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -895,10 +907,19 @@ void AsyncClient::_dns_found(const ip_addr *ipaddr){
 #endif
   if(ipaddr){
 #if ASYNC_TCP_SSL_ENABLED
-    connect(ipaddr, _connect_port, _pcb_secure);
+    bool connected = connect(ipaddr, _connect_port, _pcb_secure);
 #else
-    connect(ipaddr, _connect_port);
+    bool connected = connect(ipaddr, _connect_port);
 #endif
+    if(!connected && !_pcb){
+      // Synchronous connect failure after async DNS resolution (e.g.
+      // ERR_RTE: resolved family has no route). Without this the failure
+      // is silent: no connect/error/timeout callback ever fires and the
+      // application waits forever. Route it through _error() so the
+      // happy-eyeballs flip (if still armed) or the error/discard
+      // callbacks run. The !_pcb guard skips the already-connected case.
+      _error(ERR_RTE);
+    }
   } else {
 #if LWIP_IPV6
     // No record in either family (the dns_addrtype query already falls
